@@ -90,6 +90,7 @@
     ```
 
     前端应用将运行在 `http://localhost:5173`。
+![Uploading image.png…]()
 
 ## 管理员账户
 
