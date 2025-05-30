@@ -35,7 +35,7 @@
 1.  **克隆仓库**
 
     ```bash
-    git clone <您的仓库地址>
+    git clone git@github.com:gitzhangjun/videos_platform.git
     cd video_platform
     ```
 
