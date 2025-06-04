@@ -9,18 +9,26 @@ services:
       - "5001:5001"
     volumes:
       - ./backend:/app
-      - /app/instance
+      # 映射本地视频文件夹到容器的videos目录
+      - "D:/nginx-1.24.0/nginx-1.24.0/html/static/a/123:/app/videos"
     environment:
-      FLASK_ENV: development
+      FLASK_DEBUG: 1
       FLASK_APP: app.py
     command: flask run --host=0.0.0.0 --port=5001
+    networks:
+      - app-network
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
     ports:
-      - "80:80"
+      - "8888:8888"
     depends_on:
-      - backend    volumes:
-      - ./frontend:/app
+      - backend
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge

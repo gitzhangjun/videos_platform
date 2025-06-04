@@ -13,6 +13,7 @@
 
 <script setup>
 import { ref } from 'vue';
+import config from '../config.js';
 
 const selectedFile = ref(null);
 const uploading = ref(false);
@@ -43,7 +44,7 @@ const uploadVideo = async () => {
   formData.append('file', selectedFile.value);
 
   try {
-    const response = await fetch('http://localhost:5001/upload', {
+    const response = await fetch(`${config.API_BASE_URL}/upload`, {
       method: 'POST',
       body: formData,
     });

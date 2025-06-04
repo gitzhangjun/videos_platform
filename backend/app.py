@@ -1,42 +1,16 @@
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, session
 from flask_cors import CORS
-from flask_sqlalchemy import SQLAlchemy
-from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
-from werkzeug.security import generate_password_hash, check_password_hash
 import os
-import uuid
+import math
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'your-secret-key-here'  # 添加密钥配置
-CORS(app, resources={r"/*": {"origins": ["http://localhost:5173"], "supports_credentials": True}})  # 更新CORS配置
+app.config['SECRET_KEY'] = 'your-secret-key-here-for-sessions'
+CORS(app, resources={r"/*": {"origins": ["http://localhost:8888"], "supports_credentials": True}})
 
-# 数据库配置
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///users.db'
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-db = SQLAlchemy(app)
-
-# Flask-Login 配置
-login_manager = LoginManager()
-login_manager.init_app(app)
-login_manager.login_view = 'login'
-
-# 用户模型
-class User(UserMixin, db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    username = db.Column(db.String(80), unique=True, nullable=False)
-    password_hash = db.Column(db.String(128))
-    is_approved = db.Column(db.Boolean, default=False)
-    is_admin = db.Column(db.Boolean, default=False)
-
-    def set_password(self, password):
-        self.password_hash = generate_password_hash(password)
-
-    def check_password(self, password):
-        return check_password_hash(self.password_hash, password)
-
-@login_manager.user_loader
-def load_user(user_id):
-    return User.query.get(int(user_id))
+# 硬编码的管理员账户
+ADMIN_USERNAME = 'admin'
+ADMIN_PASSWORD = 'admin123456'
 
 # 配置视频上传目录
 UPLOAD_FOLDER = 'videos'
@@ -46,7 +20,93 @@ app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
 
+# 检查是否已登录的装饰器
+def login_required(f):
+    def decorated_function(*args, **kwargs):
+        if not session.get('logged_in'):
+            return jsonify({'error': 'Authentication required'}), 401
+        return f(*args, **kwargs)
+    decorated_function.__name__ = f.__name__
+    return decorated_function
+
+# 添加缓存头的装饰器
+def add_cache_headers(f):
+    def decorated_function(*args, **kwargs):
+        response = f(*args, **kwargs)
+        if hasattr(response, 'headers'):
+            # 设置1小时缓存
+            response.headers['Cache-Control'] = 'public, max-age=3600'
+            # 只为JSON响应生成ETag，避免文件响应的问题
+            try:
+                if response.content_type and 'application/json' in response.content_type:
+                    response.headers['ETag'] = str(hash(str(response.get_data())))
+            except RuntimeError:
+                # 对于文件响应，跳过ETag生成
+                pass
+            # 设置过期时间
+            expires = datetime.utcnow() + timedelta(hours=1)
+            response.headers['Expires'] = expires.strftime('%a, %d %b %Y %H:%M:%S GMT')
+        return response
+    decorated_function.__name__ = f.__name__
+    return decorated_function
+
+# 登录路由
+@app.route('/login', methods=['POST'])
+def login():
+    data = request.get_json()
+    username = data.get('username')
+    password = data.get('password')
+
+    if not username or not password:
+        return jsonify({'message': 'Missing username or password'}), 400
+
+    # 检查硬编码的管理员账户
+    if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+        session['logged_in'] = True
+        session['username'] = username
+        session['is_admin'] = True
+        return jsonify({
+            'message': 'Logged in successfully', 
+            'user': {
+                'username': username, 
+                'is_admin': True
+            }
+        }), 200
+    else:
+        return jsonify({'message': 'Invalid username or password'}), 401
+
+# 登出路由
+@app.route('/logout', methods=['POST'])
+@login_required
+def logout():
+    session.clear()
+    return jsonify({'message': 'Logged out successfully'}), 200
+
+# 获取当前用户信息
+@app.route('/user_info', methods=['GET'])
+@login_required
+def user_info():
+    return jsonify({
+        'username': session.get('username'), 
+        'is_admin': session.get('is_admin', False)
+    }), 200
+
+# 检查登录状态
+@app.route('/check_auth', methods=['GET'])
+def check_auth():
+    if session.get('logged_in'):
+        return jsonify({
+            'authenticated': True,
+            'user': {
+                'username': session.get('username'),
+                'is_admin': session.get('is_admin', False)
+            }
+        }), 200
+    else:
+        return jsonify({'authenticated': False}), 401
+
 @app.route('/upload', methods=['POST'])
+@login_required
 def upload_video():
     if 'file' not in request.files:
         return jsonify({'error': 'No file part'}), 400
@@ -68,130 +128,99 @@ def upload_video():
             
         try:
             file.save(file_path)
-            return jsonify({'message': 'Video uploaded successfully', 'filename': filename, 'path': f'/play/{filename}'}), 201
+            return jsonify({'message': 'Video uploaded successfully', 'filename': filename, 'path': f'/video/{filename}'}), 201
         except Exception as e:
             return jsonify({'error': str(e)}), 500
     return jsonify({'error': 'File upload failed'}), 500
 
 @app.route('/videos', methods=['GET'])
+@login_required
+@add_cache_headers
 def list_videos():
+    # 获取分页参数
+    page = request.args.get('page', 1, type=int)
+    per_page = request.args.get('per_page', 20, type=int)  # 默认每页20个视频
+    
     videos = []
     if not os.path.exists(app.config['UPLOAD_FOLDER']):
-        return jsonify({'videos': videos, 'message': 'Video directory does not exist.'})
-        
+        return jsonify({
+            'videos': videos, 
+            'total': 0,
+            'page': page,
+            'per_page': per_page,
+            'total_pages': 0,
+            'message': 'Video directory does not exist.'
+        })
+    
+    # 获取所有视频文件
+    all_files = []
     for filename in os.listdir(app.config['UPLOAD_FOLDER']):
-        # 支持更多视频格式
         if filename.lower().endswith(('.mp4', '.webm', '.ogg', '.mov', '.rm', '.rmvb', '.wmv', '.avi', '.3gp', '.mkv')):
-            videos.append({
+            file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            # 获取文件修改时间用于排序
+            mtime = os.path.getmtime(file_path)
+            all_files.append({
                 'filename': filename,
-                'path': f'/play/{filename}'
+                'path': f'/video/{filename}',
+                'mtime': mtime,
+                'size': os.path.getsize(file_path)
             })
-    return jsonify({'videos': videos})
+    
+    # 按修改时间倒序排列（最新的在前面）
+    all_files.sort(key=lambda x: x['mtime'], reverse=True)
+    
+    # 计算分页
+    total = len(all_files)
+    total_pages = math.ceil(total / per_page)
+    start_idx = (page - 1) * per_page
+    end_idx = start_idx + per_page
+    
+    # 获取当前页的视频
+    videos = all_files[start_idx:end_idx]
+    
+    # 移除不需要返回给前端的字段
+    for video in videos:
+        video.pop('mtime', None)
+        video.pop('size', None)
+    
+    return jsonify({
+        'videos': videos,
+        'total': total,
+        'page': page,
+        'per_page': per_page,
+        'total_pages': total_pages,
+        'has_next': page < total_pages,
+        'has_prev': page > 1
+    })
 
-@app.route('/play/<filename>', methods=['GET'])
+@app.route('/video/<filename>', methods=['GET'])
+@login_required
 def play_video(filename):
     try:
-        return send_from_directory(app.config['UPLOAD_FOLDER'], filename, as_attachment=False)
+        response = send_from_directory(app.config['UPLOAD_FOLDER'], filename, as_attachment=False)
+        # 为视频文件设置专门的缓存头
+        response.headers['Cache-Control'] = 'public, max-age=86400'  # 24小时
+        response.headers['Expires'] = (datetime.utcnow() + timedelta(days=1)).strftime('%a, %d %b %Y %H:%M:%S GMT')
+        # 为视频文件生成简单的ETag
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        if os.path.exists(file_path):
+            # 使用文件修改时间和大小生成ETag
+            stat = os.stat(file_path)
+            etag = f'"{stat.st_mtime}-{stat.st_size}"'
+            response.headers['ETag'] = etag
+        return response
     except FileNotFoundError:
         return jsonify({'error': 'Video not found'}), 404
 
-# 一个简单的首页，方便测试后端API，实际会被Vue前端取代
-# 注册路由
-@app.route('/register', methods=['POST'])
-def register():
-    data = request.get_json()
-    username = data.get('username')
-    password = data.get('password')
-
-    if not username or not password:
-        return jsonify({'message': 'Missing username or password'}), 400
-
-    if User.query.filter_by(username=username).first():
-        return jsonify({'message': 'User already exists'}), 409
-
-    new_user = User(username=username)
-    new_user.set_password(password)
-    db.session.add(new_user)
-    db.session.commit()
-
-    return jsonify({'message': 'User registered successfully. Waiting for admin approval.'}), 201
-
-# 登录路由
-@app.route('/login', methods=['POST'])
-def login():
-    data = request.get_json()
-    username = data.get('username')
-    password = data.get('password')
-
-    user = User.query.filter_by(username=username).first()
-
-    if user and user.check_password(password):
-        if user.username == 'admin' or user.is_approved:
-            login_user(user)
-            return jsonify({'message': 'Logged in successfully', 'user': {'id': user.id, 'username': user.username, 'is_approved': user.is_approved, 'is_admin': user.is_admin}}), 200
-        else:
-            return jsonify({'message': 'Account not approved yet. Please wait for admin approval.'}), 403
-    else:
-        return jsonify({'message': 'Invalid username or password'}), 401
-
-# 登出路由
-@app.route('/logout')
-@login_required
-def logout():
-    logout_user()
-    return jsonify({'message': 'Logged out successfully'}), 200
-
-# 获取当前用户信息
-@app.route('/user_info')
-@login_required
-def user_info():
-    return jsonify({'username': current_user.username, 'is_approved': current_user.is_approved, 'is_admin': current_user.is_admin}), 200
-
-# 管理员审批用户路由 (示例，实际应用中需要更严格的权限控制)
-@app.route('/approve_user/<int:user_id>', methods=['POST'])
-@login_required
-def approve_user(user_id):
-    # 实际应用中，这里需要验证当前用户是否是管理员
-    # 为了简化，这里假设所有登录用户都可以审批，但实际应该有角色管理
-    if not current_user.is_admin: # 假设只有管理员才能审批其他用户
-        return jsonify({'message': 'Unauthorized'}), 403
-
-    user = User.query.get(user_id)
-    if user:
-        user.is_approved = True
-        db.session.commit()
-        return jsonify({'message': f'User {user.username} approved successfully'}), 200
-    return jsonify({'message': 'User not found'}), 404
-
-# 获取所有待审批用户
-@app.route('/pending_users', methods=['GET'])
-@login_required
-def pending_users():
-    if not current_user.is_admin: # 假设只有管理员才能查看待审批用户
-        return jsonify({'message': 'Unauthorized'}), 403
-    users = User.query.filter_by(is_approved=False).all()
-    return jsonify([{'id': user.id, 'username': user.username} for user in users]), 200
-
-
 @app.route('/')
 def index():
-    return "Video Platform Backend is running! Use /videos to list videos and /upload to upload." # 保持原有首页，方便测试
+    return "Video Platform Backend is running! Please login with admin/admin123456 to access features."
 
 if __name__ == '__main__':
-    with app.app_context():
-        db.create_all() # 在应用启动时创建数据库表
-
-        # 检查并创建admin用户
-        admin_username = 'admin'
-        admin_password = '123456' # 请将此替换为更安全的密码
-        admin_user = User.query.filter_by(username=admin_username).first()
-        if not admin_user:
-            admin_user = User(username=admin_username, is_approved=True, is_admin=True)
-            admin_user.set_password(admin_password)
-            db.session.add(admin_user)
-            db.session.commit()
-            print(f"Admin user '{admin_username}' created with password '{admin_password}'")
-        else:
-            print(f"Admin user '{admin_username}' already exists.")
-
-    app.run(debug=True, port=5001) # 使用不同于Vue开发服务器的端口
+    print("=" * 50)
+    print("Video Platform Backend Starting...")
+    print("Default Admin Account:")
+    print(f"Username: {ADMIN_USERNAME}")
+    print(f"Password: {ADMIN_PASSWORD}")
+    print("=" * 50)
+    app.run(debug=True, host='0.0.0.0', port=5001)

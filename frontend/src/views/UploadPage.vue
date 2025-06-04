@@ -29,13 +29,16 @@
 
 <script setup>
 import { ref } from 'vue';
+import { useRouter } from 'vue-router';
+import config from '../config.js';
 
 const selectedFiles = ref([]);
 const uploading = ref(false);
 const uploadMessages = ref([]); // 用于存储每个文件的上传消息
 const fileInput = ref(null);
+const router = useRouter();
 
-const emit = defineEmits(['upload-success', 'navigate-home']);
+const emit = defineEmits(['upload-success']);
 
 const handleFileChange = (event) => {
   selectedFiles.value = Array.from(event.target.files);
@@ -60,7 +63,7 @@ const uploadVideos = async () => {
     uploadMessages.value.push({ text: `开始上传 '${file.name}'...`, error: false });
 
     try {
-      const response = await fetch('http://localhost:5001/upload', {
+      const response = await fetch(`${config.API_BASE_URL}/upload`, {
         method: 'POST',
         body: formData,
       });
@@ -106,7 +109,7 @@ const uploadVideos = async () => {
 };
 
 const goHome = () => {
-  emit('navigate-home');
+  router.push('/');
 };
 </script>
 
