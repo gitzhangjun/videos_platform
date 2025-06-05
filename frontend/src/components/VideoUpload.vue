@@ -21,7 +21,7 @@ const uploadMessage = ref('');
 const uploadError = ref(false);
 const fileInput = ref(null); // Ref for the file input element
 
-const emit = defineEmits(['upload-success']);
+const emit = defineEmits(['upload-success', 'video-uploaded']);
 
 const handleFileChange = (event) => {
   selectedFile.value = event.target.files[0];
@@ -49,27 +49,40 @@ const uploadVideo = async () => {
       body: formData,
     });
 
-    const data = await response.json();
-
     if (response.ok) {
-      uploadMessage.value = `视频 '${selectedFile.value.name}' 上传成功! 文件名: ${data.filename}`;
+      const result = await response.json();
+      uploadMessage.value = `视频 '${selectedFile.value.name}' 上传成功! 文件名: ${result.filename}`;
       uploadError.value = false;
       selectedFile.value = null; // Reset file input
       if (fileInput.value) {
         fileInput.value.value = ''; // Clear the file input visually
       }
       emit('upload-success'); // 通知父组件上传成功
+
+      // 根据缩略图生成结果显示不同的消息
+      if (result.thumbnail_generated) {
+        uploadMessage.value += `，缩略图已生成`;
+      } else {
+        uploadMessage.value += `，但缩略图生成失败`;
+        if (result.warning) {
+          console.warn(result.warning);
+        }
+      }
+
+      // 通知父组件刷新视频列表
+      emit('video-uploaded');
     } else {
-      uploadMessage.value = `上传失败: ${data.error || '未知错误'}`;
+      const errorData = await response.json();
+      uploadMessage.value = `上传失败: ${errorData.error || '未知错误'}`;
       uploadError.value = true;
     }
   } catch (error) {
     console.error('上传错误:', error);
     uploadMessage.value = `上传出错: ${error.message}`;
     uploadError.value = true;
+  } finally {
+    uploading.value = false;
   }
-
-  uploading.value = false;
 };
 </script>
 

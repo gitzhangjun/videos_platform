@@ -19,43 +19,55 @@
         class="video-item"
         v-for="video in videos"
         :key="video.filename"
-        @mouseenter="startPreview(video, $event)"
-        @mouseleave="stopPreview(video, $event)"
-        @click="playFullVideo(video)"
       >
-        <div class="video-thumbnail-wrapper">
-          <!-- 预览播放器 -->
+        <div class="video-thumbnail-wrapper" @click="playFullVideo(video)">
+          <!-- 使用缩略图或视频第一帧 -->
+          <img 
+            v-if="video.has_thumbnail && video.thumbnail"
+            :src="getVideoUrl(video.thumbnail)"
+            :alt="video.filename"
+            class="video-thumbnail-img"
+            loading="lazy"
+          />
+          <!-- 降级到视频第一帧 -->
           <video 
-            :ref="el => videoRefs[video.filename] = el"
-            class="video-preview"
+            v-else
+            class="video-first-frame-thumb"
+            :src="getVideoUrl(video.path) + '#t=0.1'" 
+            preload="metadata" 
             muted
-            loop
-            preload="none"
-            :src="getVideoUrl(video.path)"
-            v-show="video.isPreviewing"
+            disablepictureinpicture 
+            playsinline
           ></video>
-          <!-- 静态视频帧作为缩略图 -->
-          <div class="video-static-thumbnail" v-show="!video.isPreviewing">
-            <video 
-              class="video-first-frame-thumb"
-              :src="getVideoUrl(video.path) + '#t=0.1'" 
-              preload="metadata" 
-              muted
-              disablepictureinpicture 
-              playsinline
-            ></video>
-            <!-- 播放按钮 -->
-            <div class="play-overlay">
-              <div class="play-button">
-                <svg width="50" height="50" viewBox="0 0 24 24" fill="none">
-                  <circle cx="12" cy="12" r="10" fill="rgba(0,0,0,0.7)"/>
-                  <polygon points="10,8 16,12 10,16" fill="white"/>
-                </svg>
-              </div>
+          
+          <!-- 播放按钮覆盖层 -->
+          <div class="play-overlay">
+            <div class="play-button">
+              <svg width="50" height="50" viewBox="0 0 24 24" fill="none">
+                <circle cx="12" cy="12" r="10" fill="rgba(0,0,0,0.7)"/>
+                <polygon points="10,8 16,12 10,16" fill="white"/>
+              </svg>
             </div>
           </div>
         </div>
-        <p class="video-filename">{{ video.filename }}</p>
+        
+        <div class="video-info">
+          <p class="video-filename" :title="video.filename">{{ video.filename }}</p>
+          <div class="video-actions">
+            <button @click="playFullVideo(video)" class="play-btn">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                <polygon points="5,3 19,12 5,21" fill="currentColor"/>
+              </svg>
+              播放
+            </button>
+            <button @click="confirmDelete(video)" class="delete-btn">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6h14zM10 11v6M14 11v6" stroke="currentColor" stroke-width="2"/>
+              </svg>
+              删除
+            </button>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -83,16 +95,35 @@
       </button>
     </div>
 
+    <!-- 删除确认对话框 -->
+    <div v-if="deleteConfirm.show" class="delete-modal" @click.self="cancelDelete">
+      <div class="delete-modal-content">
+        <h3>确认删除</h3>
+        <p>确定要删除视频 "{{ deleteConfirm.video?.filename }}" 吗？</p>
+        <p class="delete-warning">此操作无法撤销，视频文件和缩略图将被永久删除。</p>
+        <div class="delete-modal-actions">
+          <button @click="cancelDelete" class="cancel-btn">取消</button>
+          <button @click="executeDelete" class="confirm-delete-btn" :disabled="deleting">
+            {{ deleting ? '删除中...' : '确认删除' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- 美化的全屏播放模态框 -->
     <div v-if="playingVideo" class="video-modal" @click.self="closeModal">
       <div class="video-modal-content">
         <div class="video-player-wrapper">
           <video 
+            ref="videoPlayer"
             :src="getVideoUrl(playingVideo.path)" 
             controls 
             autoplay 
             controlsList="nodownload"
             class="enhanced-video-player"
+            @loadedmetadata="setupKeyboardControls"
+            @click="focusPlayer"
+            tabindex="0"
           ></video>
         </div>
         <button @click="closeModal" class="close-modal-btn">
@@ -101,13 +132,16 @@
           </svg>
         </button>
         <div class="video-title">{{ playingVideo.filename }}</div>
+        <div class="video-controls-hint">
+          按键提示：← 快退10秒 | → 快进10秒 | 空格 播放/暂停
+        </div>
       </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, reactive } from 'vue';
+import { ref, onMounted, reactive, nextTick } from 'vue';
 import config from '../config.js';
 
 const emit = defineEmits(['stats-updated']);
@@ -115,10 +149,16 @@ const emit = defineEmits(['stats-updated']);
 const videos = ref([]);
 const loading = ref(true);
 const error = ref(null);
-const videoRefs = reactive({});
-let previewTimeout = null;
+const deleting = ref(false);
 
 const playingVideo = ref(null);
+const videoPlayer = ref(null);
+
+// 删除确认对话框状态
+const deleteConfirm = reactive({
+  show: false,
+  video: null
+});
 
 // 分页数据
 const pagination = ref({
@@ -169,7 +209,7 @@ const fetchVideos = async (page = 1) => {
   const cachedData = getCachedData(page);
   if (cachedData) {
     console.log(`Loading page ${page} from cache`);
-    videos.value = cachedData.videos.map(v => ({ ...v, isPreviewing: false }));
+    videos.value = cachedData.videos;
     pagination.value = {
       page: cachedData.page,
       per_page: cachedData.per_page,
@@ -202,7 +242,7 @@ const fetchVideos = async (page = 1) => {
     setCachedData(page, data);
     
     // 更新状态
-    videos.value = data.videos.map(v => ({ ...v, isPreviewing: false }));
+    videos.value = data.videos;
     pagination.value = {
       page: data.page,
       per_page: data.per_page,
@@ -237,41 +277,112 @@ const getVideoUrl = (path) => {
   return `${config.API_BASE_URL}${path}`;
 };
 
-const startPreview = (video, event) => {
-  clearTimeout(previewTimeout);
-  previewTimeout = setTimeout(() => {
-    const videoElement = videoRefs[video.filename];
-    if (videoElement) {
-      video.isPreviewing = true;
-      videoElement.currentTime = 0;
-      videoElement.play().catch(err => {
-        console.warn('Preview play failed:', err);
-        video.isPreviewing = false;
-      });
-    }
-  }, 500); // 增加延迟，减少不必要的预览
+// 删除相关功能
+const confirmDelete = (video) => {
+  deleteConfirm.show = true;
+  deleteConfirm.video = video;
 };
 
-const stopPreview = (video, event) => {
-  clearTimeout(previewTimeout);
-  const videoElement = videoRefs[video.filename];
-  if (videoElement && video.isPreviewing) {
-    videoElement.pause();
-    videoElement.currentTime = 0;
-    video.isPreviewing = false;
+const cancelDelete = () => {
+  deleteConfirm.show = false;
+  deleteConfirm.video = null;
+};
+
+const executeDelete = async () => {
+  if (!deleteConfirm.video) return;
+  
+  deleting.value = true;
+  try {
+    const response = await fetch(`${config.API_BASE_URL}/video/${deleteConfirm.video.filename}`, {
+      method: 'DELETE'
+    });
+    
+    if (response.ok) {
+      // 删除成功，刷新列表
+      await fetchVideos(pagination.value.page);
+      // 清除相关页面的缓存
+      clearCache();
+      cancelDelete();
+    } else {
+      const errorData = await response.json();
+      throw new Error(errorData.error || 'Delete failed');
+    }
+  } catch (e) {
+    console.error('删除视频失败:', e);
+    error.value = `删除失败: ${e.message}`;
+  } finally {
+    deleting.value = false;
   }
 };
 
+// 播放相关功能
 const playFullVideo = (video) => {
   playingVideo.value = video;
   // 禁用页面滚动
   document.body.style.overflow = 'hidden';
+  
+  // 下一帧后设置焦点和键盘控制
+  nextTick(() => {
+    setupKeyboardControls();
+  });
 };
 
 const closeModal = () => {
+  // 移除键盘事件监听
+  document.removeEventListener('keydown', handleKeyboardShortcuts);
   playingVideo.value = null;
   // 恢复页面滚动
   document.body.style.overflow = 'auto';
+};
+
+const focusPlayer = () => {
+  if (videoPlayer.value) {
+    videoPlayer.value.focus();
+  }
+};
+
+const setupKeyboardControls = () => {
+  if (videoPlayer.value) {
+    // 设置视频播放器为可聚焦
+    videoPlayer.value.focus();
+    
+    // 添加键盘事件监听
+    document.addEventListener('keydown', handleKeyboardShortcuts);
+  }
+};
+
+const handleKeyboardShortcuts = (event) => {
+  if (!videoPlayer.value) return;
+  
+  switch (event.key) {
+    case 'ArrowLeft':
+      // 快退10秒
+      event.preventDefault();
+      videoPlayer.value.currentTime = Math.max(0, videoPlayer.value.currentTime - 10);
+      break;
+    case 'ArrowRight':
+      // 快进10秒
+      event.preventDefault();
+      videoPlayer.value.currentTime = Math.min(
+        videoPlayer.value.duration, 
+        videoPlayer.value.currentTime + 10
+      );
+      break;
+    case ' ':
+      // 空格键播放/暂停
+      event.preventDefault();
+      if (videoPlayer.value.paused) {
+        videoPlayer.value.play();
+      } else {
+        videoPlayer.value.pause();
+      }
+      break;
+    case 'Escape':
+      // ESC键关闭模态框
+      event.preventDefault();
+      closeModal();
+      break;
+  }
 };
 
 // 清除缓存的方法
@@ -414,27 +525,13 @@ onMounted(() => {
   border-radius: 12px 12px 0 0;
 }
 
-.video-preview,
-.video-static-thumbnail video {
+.video-thumbnail-img {
   position: absolute;
   top: 0;
   left: 0;
   width: 100%;
   height: 100%;
   object-fit: cover;
-}
-
-.video-static-thumbnail {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: inherit;
-  overflow: hidden;
 }
 
 .video-first-frame-thumb {
@@ -471,8 +568,12 @@ onMounted(() => {
   transform: scale(1);
 }
 
-.video-filename {
+.video-info {
   padding: 15px;
+  background: white;
+}
+
+.video-filename {
   text-align: left;
   font-size: 0.95em;
   color: #333;
@@ -483,7 +584,49 @@ onMounted(() => {
   -webkit-box-orient: vertical;
   overflow: hidden;
   min-height: 2.8em;
-  margin: 0;
+  margin: 0 0 10px 0;
+}
+
+.video-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.play-btn,
+.delete-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.85em;
+  font-weight: 500;
+  transition: all 0.3s ease;
+}
+
+.play-btn {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  flex: 1;
+}
+
+.play-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 8px rgba(102, 126, 234, 0.3);
+}
+
+.delete-btn {
+  background: linear-gradient(135deg, #ff6b6b 0%, #ee5a5a 100%);
+  color: white;
+  flex: 0 0 auto;
+}
+
+.delete-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 8px rgba(255, 107, 107, 0.3);
 }
 
 /* 分页样式 */
@@ -596,5 +739,98 @@ onMounted(() => {
   font-size: 1.2em;
   font-weight: 500;
   text-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
+}
+
+.video-controls-hint {
+  color: white;
+  text-align: center;
+  margin-top: 10px;
+  font-size: 0.8em;
+  font-weight: 500;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
+}
+
+/* 删除确认对话框 */
+.delete-modal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.75);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 3000;
+  backdrop-filter: blur(5px);
+}
+
+.delete-modal-content {
+  background: white;
+  padding: 30px;
+  border-radius: 12px;
+  max-width: 400px;
+  width: 90%;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+}
+
+.delete-modal-content h3 {
+  margin: 0 0 15px 0;
+  color: #333;
+  font-size: 1.3em;
+}
+
+.delete-modal-content p {
+  margin: 10px 0;
+  color: #666;
+  line-height: 1.5;
+}
+
+.delete-warning {
+  color: #ff6b6b !important;
+  font-weight: 500;
+}
+
+.delete-modal-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 20px;
+  justify-content: flex-end;
+}
+
+.cancel-btn,
+.confirm-delete-btn {
+  padding: 10px 20px;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 500;
+  transition: all 0.3s ease;
+}
+
+.cancel-btn {
+  background: #f8f9fa;
+  color: #333;
+  border: 1px solid #ddd;
+}
+
+.cancel-btn:hover {
+  background: #e9ecef;
+}
+
+.confirm-delete-btn {
+  background: linear-gradient(135deg, #ff6b6b 0%, #ee5a5a 100%);
+  color: white;
+}
+
+.confirm-delete-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 8px rgba(255, 107, 107, 0.3);
+}
+
+.confirm-delete-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
 }
 </style>
